@@ -2,19 +2,19 @@ select
        # get po attributes
     po.po_id as po_number
     , po.supplier
-    , po.delivery_start_time
-    , po.delivery_end_time
+    , po.delivery_start_time as delivery_date_time_start
+    , po.delivery_end_time as delivery_date_time_end
      # get po line attributes
     , pl.prod_code as sku_code
-    , pl.original_expected_qty
+    , pl.original_expected_qty as total_ordered_units
      # get delivery attributes
     , max(d.delivery_date) actual_delivery_date_time
      # get delivery line attributes
-    , sum(dl.received_qty) received_qty
-    , sum(dl.palletised_usable_qty) palletised_usable_qty
-    , sum(dl.rejected_qty) rejected_qty
+    , sum(dl.received_qty) as total_received_units
+    , sum(dl.palletised_usable_qty) as palletised_usable_units
+    , sum(dl.rejected_qty) as rejected_units
      # get the out of spec quantities
-    , sum(qc.vm_check_value) out_of_spec_qty
+    , sum(qc.vm_check_value) as out_of_spec_units
 from mis.mx_po po
 LEFT JOIN mis.mx_po_line pl
     on po.po_id = pl.po_id

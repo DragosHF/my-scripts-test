@@ -10,7 +10,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from gspread_dataframe import set_with_dataframe
 import datetime as dt
 import boto3
-# import whatever
 
 # vars
 date_start = '2019-06-28'
@@ -65,7 +64,7 @@ df_fcms = pd.read_sql(con = conn_fcms, sql = sql_string_fcms, params={"d_start":
 df_dd = pd.read_sql(con = conn_dwh, sql = sql_string_dd, params=(date_start,))
 
 # get delivery week by joining FCMS with dd
-df_fcms['date_adj'] = df_fcms['delivery_start_time'].dt.date + dt.timedelta(days = 1)
+df_fcms['date_adj'] = df_fcms['delivery_date_time_start'].dt.date + dt.timedelta(days = 1)
 df_fcms['date_adj'] = df_fcms['date_adj'].astype(str)
 df_fcms = (pd
            .merge(df_fcms, df_dd, left_on = 'date_adj', right_on = 'date_string_backwards')
@@ -85,19 +84,20 @@ df_fcms['category_abbr'] = df_fcms['sku_code'].str[:3]
 
 # OT
 # calculate delivery window: earlier than 5:30, between 5:30 and 11:00, other
-df_fcms['it_window'] = np.where(
-    df_fcms['delivery_end_time'].dt.strftime('%H:%M').between('00:00', '05:30'), 1,
+df_fcms['ot_window'] = np.where(
+    df_fcms['delivery_date_time_end'].dt.strftime('%H:%M').between('00:00', '05:30'), 1,
     np.where(
-        df_fcms['delivery_end_time'].dt.strftime('%H:%M').between('05:31', '11:00'), 2, 3
+        df_fcms['delivery_date_time_end'].dt.strftime('%H:%M').between('05:31', '11:00'), 2, 3
     )
 )
 # calculate time deviation in hours for deliveries out of range
-df_fcms['time_dev'] = np.where(
-    df_fcms['actual_delivery_date_time'].between(df_fcms['delivery_start_time'], df_fcms['delivery_end_time']), 0,
+df_fcms['time_dev_hours'] = np.where(
+    df_fcms['actual_delivery_date_time'].between(df_fcms['delivery_date_time_start'],
+                                                 df_fcms['delivery_date_time_end']), 0,
     np.where(
-        df_fcms['actual_delivery_date_time'] < df_fcms['delivery_start_time'],
-            (df_fcms['actual_delivery_date_time'] - df_fcms['delivery_start_time']).astype('timedelta64[m]')/60,
-            (df_fcms['actual_delivery_date_time'] - df_fcms['delivery_end_time']).astype('timedelta64[m]')/60
+        df_fcms['actual_delivery_date_time'] < df_fcms['delivery_date_time_start'],
+            (df_fcms['actual_delivery_date_time'] - df_fcms['delivery_date_time_start']).astype('timedelta64[m]')/60,
+            (df_fcms['actual_delivery_date_time'] - df_fcms['delivery_date_time_end']).astype('timedelta64[m]')/60
     )
 )
 # create bins for delivery time deviations
@@ -118,7 +118,7 @@ time_dev_bins = pd.IntervalIndex.from_tuples([
 time_dev_labels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
 df_fcms['ot_bin'] = (pd
-                     .cut(df_fcms['time_dev'], time_dev_bins)
+                     .cut(df_fcms['time_dev_hours'], time_dev_bins)
                      .cat.rename_categories(time_dev_labels)
                      .astype('int')
                      )
@@ -130,13 +130,13 @@ df_ot_score = pd.read_csv(scores_path/'ot_scores.csv')
 df_fcms = (pd
            .merge(df_fcms, df_ot_score,
                   how = 'left',
-                  left_on = ['it_window', 'ot_bin'], right_on = ['delivery_window', 'deviation_bin'])
+                  left_on = ['ot_window', 'ot_bin'], right_on = ['delivery_window', 'deviation_bin'])
            .drop(columns = ['delivery_window', 'deviation_bin', 'ot_bin'])
            )
 
 # IF
 # calculate delivered percentage
-df_fcms['delivered_perc'] = df_fcms['received_qty']/df_fcms['original_expected_qty']
+df_fcms['delivered_perc'] = df_fcms['total_received_units']/df_fcms['total_ordered_units']
 # create bins for received percentages
 rec_bins = pd.IntervalIndex.from_tuples([
     (0, 0.9),
@@ -165,16 +165,30 @@ df_fcms = (pd
 
 # IQ
 # calculate usable quantity
-df_fcms['final_usable_qty'] = df_fcms['palletised_usable_qty'] - 0.3*df_fcms['out_of_spec_qty']
-df_fcms['iq_reference'] = df_fcms[['original_expected_qty', 'received_qty']].min(axis = 1)
-df_fcms['iq_score'] = df_fcms['final_usable_qty']/df_fcms['iq_reference']
+df_fcms['final_usable_units'] = df_fcms['palletised_usable_units'] - 0.3*df_fcms['out_of_spec_units']
+df_fcms['iq_reference'] = df_fcms[['total_ordered_units', 'total_received_units']].min(axis = 1)
+df_fcms['iq_score'] = df_fcms['final_usable_units']/df_fcms['iq_reference']
 df_fcms['iq_score'] = df_fcms['iq_score'].fillna(value = 0).clip(upper=1)
+df_fcms['otifiq'] = df_fcms['ot_score']*0.4 + df_fcms['if_score']*0.3 + df_fcms['iq_score']*0.3
+
+
+int_cols = ['total_ordered_units', 'total_received_units', 'rejected_units', 'palletised_usable_units',
+            'out_of_spec_units', 'final_usable_units']
+
+for col in int_cols:
+    df_fcms[col] = (
+        df_fcms[col]
+        .fillna(0)
+        .round()
+        .astype('int')
+    )
 
 # arrange columns
-sorted_cols = ['country', 'dc', 'hf_week', 'category_abbr', 'po_number', 'supplier', 'sku_code', 'original_expected_qty',
-               'delivery_start_time', 'delivery_end_time', 'actual_delivery_date_time', 'received_qty', 'rejected_qty',
-               'palletised_usable_qty', 'out_of_spec_qty', 'final_usable_qty', 'it_window', 'time_dev', 'delivered_perc',
-               'iq_reference', 'ot_score', 'if_score', 'iq_score']
+sorted_cols = ['country', 'dc', 'hf_week', 'category_abbr', 'po_number', 'supplier', 'sku_code', 'total_ordered_units',
+               'delivery_date_time_start', 'delivery_date_time_end', 'actual_delivery_date_time',
+               'total_received_units', 'rejected_units', 'palletised_usable_units', 'out_of_spec_units',
+               'final_usable_units', 'ot_window', 'time_dev_hours', 'delivered_perc', 'iq_reference', 'ot_score',
+               'if_score', 'iq_score', 'otifiq']
 df_fcms = df_fcms.reindex(columns = sorted_cols)
 
 # export to GSheet
