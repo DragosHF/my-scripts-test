@@ -1,4 +1,3 @@
--- test
 import mysql.connector
 import pyodbc
 import pandas as pd
