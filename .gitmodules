@@ -1,0 +1,4 @@
+[submodule "slack"]
+	path = slack
+	url = https://github.com/DragosHF/slack
+	ignore = all
